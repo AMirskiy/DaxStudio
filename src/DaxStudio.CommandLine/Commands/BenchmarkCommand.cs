@@ -233,10 +233,7 @@ namespace DaxStudio.CommandLine.Commands
                     traceActive, serverTimes, timingHandler);
                 details.Add(r);
 
-                if (!silent)
-                    AnsiConsole.MarkupLine($"  Cold {i + 1}/{settings.ColdRuns}: [bold]{r.TotalDurationMs}ms[/] " +
-                        $"(FE={r.FormulaEngineDurationMs} SE={r.StorageEngineDurationMs} " +
-                        $"SEq={r.StorageEngineQueryCount} rows={r.RowCount})");
+                if (!silent) PrintRunResult("Cold", i + 1, settings.ColdRuns, r);
             }
 
             for (int i = 0; i < settings.WarmRuns; i++)
@@ -249,10 +246,7 @@ namespace DaxStudio.CommandLine.Commands
                     traceActive, serverTimes, timingHandler);
                 details.Add(r);
 
-                if (!silent)
-                    AnsiConsole.MarkupLine($"  Warm {i + 1}/{settings.WarmRuns}: [bold]{r.TotalDurationMs}ms[/] " +
-                        $"(FE={r.FormulaEngineDurationMs} SE={r.StorageEngineDurationMs} " +
-                        $"SEq={r.StorageEngineQueryCount} rows={r.RowCount})");
+                if (!silent) PrintRunResult("Warm", i + 1, settings.WarmRuns, r);
             }
 
             // Stop trace and close
@@ -339,6 +333,7 @@ namespace DaxStudio.CommandLine.Commands
                     result.StorageEngineQueryCount = timings.StorageEngineQueryCount;
                     result.StorageEngineCpuMs = timings.StorageEngineCpu;
                     result.TotalCpuMs = timings.TotalCpuDuration;
+                    result.TotalDirectQueryDurationMs = timings.TotalDirectQueryDuration;
                     result.VertipaqCacheMatches = timings.VertipaqCacheMatches;
                 }
             }
@@ -372,6 +367,7 @@ namespace DaxStudio.CommandLine.Commands
                 FormulaEngineDurationMs = agg(rows.Select(r => (double)r.FormulaEngineDurationMs)),
                 StorageEngineDurationMs = agg(rows.Select(r => (double)r.StorageEngineDurationMs)),
                 StorageEngineQueryCount = agg(rows.Select(r => (double)r.StorageEngineQueryCount)),
+                TotalDirectQueryDurationMs = agg(rows.Select(r => (double)r.TotalDirectQueryDurationMs)),
                 VertipaqCacheMatches = agg(rows.Select(r => (double)r.VertipaqCacheMatches)),
                 RowCount = agg(rows.Select(r => (double)r.RowCount))
             });
@@ -387,6 +383,9 @@ namespace DaxStudio.CommandLine.Commands
 
         private static void PrintSummaryTable(List<BenchmarkSummaryRow> summary, bool hasTrace)
         {
+            // only show the DirectQuery column when DQ activity was captured
+            bool hasDirectQuery = hasTrace && summary.Any(r => r.TotalDirectQueryDurationMs > 0);
+
             AnsiConsole.WriteLine();
             var table = new Table().Title("[bold]Benchmark Summary[/]");
             table.AddColumn("Cache");
@@ -399,20 +398,31 @@ namespace DaxStudio.CommandLine.Commands
                 table.AddColumn(new TableColumn("SE Queries").RightAligned());
                 table.AddColumn(new TableColumn("SE Cache").RightAligned());
             }
+            if (hasDirectQuery)
+                table.AddColumn(new TableColumn("DQ (ms)").RightAligned());
             table.AddColumn(new TableColumn("Rows").RightAligned());
 
             foreach (var row in summary)
             {
+                var cells = new List<string> { row.CacheType, row.Statistic, N(row.TotalDurationMs) };
                 if (hasTrace)
-                    table.AddRow(row.CacheType, row.Statistic,
-                        N(row.TotalDurationMs), N(row.FormulaEngineDurationMs),
-                        N(row.StorageEngineDurationMs), N(row.StorageEngineQueryCount),
-                        N(row.VertipaqCacheMatches), N(row.RowCount));
-                else
-                    table.AddRow(row.CacheType, row.Statistic,
-                        N(row.TotalDurationMs), N(row.RowCount));
+                    cells.AddRange(new[] {
+                        N(row.FormulaEngineDurationMs), N(row.StorageEngineDurationMs),
+                        N(row.StorageEngineQueryCount), N(row.VertipaqCacheMatches) });
+                if (hasDirectQuery)
+                    cells.Add(N(row.TotalDirectQueryDurationMs));
+                cells.Add(N(row.RowCount));
+                table.AddRow(cells.ToArray());
             }
             AnsiConsole.Write(table);
+        }
+
+        private static void PrintRunResult(string cacheType, int run, int totalRuns, BenchmarkResult r)
+        {
+            string dq = r.TotalDirectQueryDurationMs > 0 ? $" DQ={r.TotalDirectQueryDurationMs}" : string.Empty;
+            AnsiConsole.MarkupLine($"  {cacheType} {run}/{totalRuns}: [bold]{r.TotalDurationMs}ms[/] " +
+                $"(FE={r.FormulaEngineDurationMs} SE={r.StorageEngineDurationMs}{dq} " +
+                $"SEq={r.StorageEngineQueryCount} rows={r.RowCount})");
         }
 
         private static string N(double v) => v.ToString("N0", CultureInfo.InvariantCulture);
@@ -423,7 +433,7 @@ namespace DaxStudio.CommandLine.Commands
             var sb = new StringBuilder();
             sb.AppendLine("Sequence,Cache,TotalDuration_ms,FormulaEngineDuration_ms," +
                 "StorageEngineDuration_ms,StorageEngineQueryCount,StorageEngineCpu_ms," +
-                "TotalCpu_ms,VertipaqCacheMatches,RowCount,Error");
+                "TotalCpu_ms,TotalDirectQueryDuration_ms,VertipaqCacheMatches,RowCount,Error");
 
             foreach (var r in details)
                 sb.AppendLine(string.Join(",", new[]
@@ -436,6 +446,7 @@ namespace DaxStudio.CommandLine.Commands
                     Csv(r.StorageEngineQueryCount.ToString(CultureInfo.InvariantCulture)),
                     Csv(r.StorageEngineCpuMs.ToString(CultureInfo.InvariantCulture)),
                     Csv(r.TotalCpuMs.ToString(CultureInfo.InvariantCulture)),
+                    Csv(r.TotalDirectQueryDurationMs.ToString(CultureInfo.InvariantCulture)),
                     Csv(r.VertipaqCacheMatches.ToString(CultureInfo.InvariantCulture)),
                     Csv(r.RowCount.ToString(CultureInfo.InvariantCulture)),
                     Csv(r.Error ?? string.Empty)
@@ -443,7 +454,8 @@ namespace DaxStudio.CommandLine.Commands
 
             sb.AppendLine().AppendLine("# Summary");
             sb.AppendLine("Cache,Statistic,TotalDuration_ms,FormulaEngineDuration_ms," +
-                "StorageEngineDuration_ms,StorageEngineQueryCount,VertipaqCacheMatches,RowCount");
+                "StorageEngineDuration_ms,StorageEngineQueryCount,TotalDirectQueryDuration_ms," +
+                "VertipaqCacheMatches,RowCount");
 
             foreach (var r in summary)
                 sb.AppendLine(string.Join(",", new[]
@@ -454,6 +466,7 @@ namespace DaxStudio.CommandLine.Commands
                     Csv(r.FormulaEngineDurationMs.ToString("F1", CultureInfo.InvariantCulture)),
                     Csv(r.StorageEngineDurationMs.ToString("F1", CultureInfo.InvariantCulture)),
                     Csv(r.StorageEngineQueryCount.ToString("F1", CultureInfo.InvariantCulture)),
+                    Csv(r.TotalDirectQueryDurationMs.ToString("F1", CultureInfo.InvariantCulture)),
                     Csv(r.VertipaqCacheMatches.ToString("F1", CultureInfo.InvariantCulture)),
                     Csv(r.RowCount.ToString("F1", CultureInfo.InvariantCulture))
                 }));
@@ -485,6 +498,7 @@ namespace DaxStudio.CommandLine.Commands
             public long StorageEngineQueryCount { get; set; }
             public long StorageEngineCpuMs { get; set; }
             public long TotalCpuMs { get; set; }
+            public long TotalDirectQueryDurationMs { get; set; }
             public int VertipaqCacheMatches { get; set; }
             public long RowCount { get; set; }
             public string Error { get; set; }
@@ -498,6 +512,7 @@ namespace DaxStudio.CommandLine.Commands
             public double FormulaEngineDurationMs { get; set; }
             public double StorageEngineDurationMs { get; set; }
             public double StorageEngineQueryCount { get; set; }
+            public double TotalDirectQueryDurationMs { get; set; }
             public double VertipaqCacheMatches { get; set; }
             public double RowCount { get; set; }
         }
